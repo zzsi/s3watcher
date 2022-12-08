@@ -8,7 +8,9 @@ import time
 from typing import Iterable
 from urllib.parse import unquote_plus
 import boto3
+from botocore.exceptions import ClientError
 from .s3_event import S3Event, FileEventType
+from .infra.sqs_utils import create_queue, configure_s3_sqs_for_notification, get_account_number
 
 
 LOGGER = logging.getLogger(__name__)
@@ -24,17 +26,98 @@ class S3Watcher:
 
     bucket: str
     prefix: str = None
-    sqs_name: str = None
+
+    create_sqs_queue: bool = False
+    queue_url: str = None
+    purge_queue_before_watching: bool = False
+    delete_sqs_queue_after_done: bool = False
     wait_seconds: int = 3
     max_num_messages_per_fetch: int = 10
-    purge_queue_before_watching: bool = False
-    create_sqs_queue: bool = False
-    delete_sqs_queue_after_done: bool = False
+
+    def __post_init__(self, queue_url=None):
+
+        session = boto3.session.Session()
+        self.s3 = session.resource("s3")
+        bucket = self.bucket
+        self.bucket = self.s3.Bucket(bucket)
+        self.queue_name = f"{bucket}-s3watcher"
+
+        if queue_url:
+            self.sqs = session.resource("sqs")
+            self.queue = self.sqs.Queue(queue_url)
+            if self.purge_queue_before_watching:
+                # Purge the queue since we're about to re-enumerate the
+                # whole bucket and don't need to bother reading old records
+                try:
+                    self.queue.purge()
+                except self.sqs.meta.client.exceptions.PurgeQueueInProgress:
+                    LOGGER.warning(
+                        f"Queue purge already in progress. Queue url: {queue_url}"
+                    )
+        else:
+            self.sqs = None
+            self.queue = None
+
+    def setup_notification_and_queue(self, bucket_name: str, sqs_name: str):
+        """
+        TODO: a s3 event notification config looks something like:
+
+        {
+            "QueueConfigurations": [
+                {
+                    "Id": "Notifications",
+                    "QueueArn": "arn:aws:sqs:us-east-1:xxx:<queue name>",
+                    "Events": [
+                        "s3:ObjectCreated:*",
+                        "s3:ObjectRemoved:*",
+                        "s3:ObjectRestore:*"
+                    ]
+                }
+            ]
+        }
+
+        Currently we simply overide it. The correct thing to do is to
+        append to the QueueConfigurations.
+
+        Adding event notification configs does not incur cost.
+        """
+        print("Creating AWS SQS Queue : " + sqs_name)
+        try:
+            queue = create_queue(sqs_name)
+            configure_s3_sqs_for_notification(bucket_name, sqs_name)
+        except ClientError:
+            print("Couldn't create queue named {0}.".format(sqs_name))
+            raise
+
+        s3_client = boto3.client("s3")
+        bucket_name = self.bucket
+        bucket_notification = s3_client.get_bucket_notification(
+            Bucket=bucket_name, ExpectedBucketOwner=get_account_number()
+        )
+        if "QueueConfiguration" in bucket_notification:
+            queueConfig = bucket_notification["QueueConfiguration"]
+            # print(queueConfig)
+            if "Queue" in queueConfig:
+                queue = queueConfig["Queue"]
+                queue_name = queue.split(":")[-1]
+                sqs_client = boto3.client("sqs")
+                queue_url = sqs_client.get_queue_url(
+                    QueueName=queue_name, QueueOwnerAWSAccountId=get_account_number()
+                )
+                self.queue_url = queue_url
+            else:
+                print(
+                    f"No queue url in QueueConfiguration. Bucket: {bucket_name}")
+        else:
+            raise ValueError(
+                f"QueueConfiguration not in the bucket notification api response. Bucket: {bucket_name}")
 
     def watch(self) -> Iterable[S3Event]:
         """
         Start watching the bucket for updates.
         """
+        if self.create_sqs_queue:
+            self.setup_notification_and_queue(self.bucket, self.queue_name)
         while True:
             messages = self.queue.receive_messages(
                 MaxNumberOfMessages=self.max_num_messages_per_fetch,
@@ -57,29 +140,8 @@ class S3Watcher:
                 # TODO: should the message be deleted here?
                 msg.delete()
 
-    def __post_init__(self, bucket, queue_url=None):
-
-        session = boto3.session.Session()
-        self.s3 = session.resource("s3")
-        self.bucket = self.s3.Bucket(bucket)
-
-        if queue_url:
-            self.sqs = session.resource("sqs")
-            self.queue = self.sqs.Queue(queue_url)
-            if self.purge_queue_before_watching:
-                # Purge the queue since we're about to re-enumerate the
-                # whole bucket and don't need to bother reading old records
-                try:
-                    self.queue.purge()
-                except self.sqs.meta.client.exceptions.PurgeQueueInProgress:
-                    LOGGER.warning(
-                        f"Queue purge already in progress. Queue url: {queue_url}"
-                    )
-        else:
-            self.sqs = None
-            self.queue = None
-
     def __del__(self):
+        # TODO: is __del__ the right place to do this?
         if self.delete_sqs_queue_after_done:
             self._delete_sqs_queue()
 
@@ -90,7 +152,7 @@ class S3Watcher:
     def _create_event(self, record):
         """Convert S3 SQS record to a S3Event.
         See
-        https://docs.aws.amazon.com/AmazonS3/latest/dev/notification-content-structure.html
+        https: // docs.aws.amazon.com/AmazonS3/latest/dev/notification-content-structure.html
         for record details.
         """
         event_source = record.get("eventSource")
