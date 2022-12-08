@@ -9,6 +9,7 @@ from typing import Iterable
 from urllib.parse import unquote_plus
 import boto3
 from .s3_event import S3Event, FileEventType
+from .infra.sqs_utils import create_queue, configure_s3_sqs_for_notification
 
 
 LOGGER = logging.getLogger(__name__)
@@ -24,17 +25,70 @@ class S3Watcher:
 
     bucket: str
     prefix: str = None
-    sqs_name: str = None
+
+    create_sqs_queue: bool = False
+    queue_url: str = None
+    purge_queue_before_watching: bool = False
+    delete_sqs_queue_after_done: bool = False
     wait_seconds: int = 3
     max_num_messages_per_fetch: int = 10
-    purge_queue_before_watching: bool = False
-    create_sqs_queue: bool = False
-    delete_sqs_queue_after_done: bool = False
+
+    def setup_notification_and_queue(self):
+        """
+        TODO: a s3 event notification config looks something like:
+
+        {
+            "QueueConfigurations": [
+                {
+                    "Id": "Notifications",
+                    "QueueArn": "arn:aws:sqs:us-east-1:xxx:<queue name>",
+                    "Events": [
+                        "s3:ObjectCreated:*",
+                        "s3:ObjectRemoved:*",
+                        "s3:ObjectRestore:*"
+                    ]
+                }
+            ]
+        }
+
+        Currently we simply overide it. The correct thing to do is to
+        append to the QueueConfigurations.
+        """
+        print("Creating AWS SQS Queue : " + sqs_name)
+        try:
+            queue = create_queue(sqs_name)
+            configure_s3_sqs_for_notification(bucket_name, sqs_name)
+        except ClientError as error:
+            print("Couldn't create queue named {0}.".format(sqs_name))
+            raise
+
+        s3_client = boto3.client("s3")
+        bucket_name = self.bucket
+        bucket_notification = s3_client.get_bucket_notification(
+            Bucket=bucket_name, ExpectedBucketOwner=get_account_number()
+        )
+        if "QueueConfiguration" in bucket_notification:
+            queueConfig = bucket_notification["QueueConfiguration"]
+            # print(queueConfig)
+            if "Queue" in queueConfig:
+                queue = queueConfig["Queue"]
+                queue_name = queue.split(":")[-1]
+                sqs_client = boto3.client("sqs")
+                queue_url = sqs_client.get_queue_url(
+                    QueueName=queue_name, QueueOwnerAWSAccountId=get_account_number()
+                )
+                self.queue_url = queue_url
+            else:
+                print(f"No queue url in QueueConfiguration. Bucket: {bucket_name}")
+        else:
+            raise ValueError(f"QueueConfiguration not in the bucket notification api response. Bucket: {bucket_name}")
 
     def watch(self) -> Iterable[S3Event]:
         """
         Start watching the bucket for updates.
         """
+        if self.create_sqs_queue:
+            self.setup_notification_and_queue()
         while True:
             messages = self.queue.receive_messages(
                 MaxNumberOfMessages=self.max_num_messages_per_fetch,
