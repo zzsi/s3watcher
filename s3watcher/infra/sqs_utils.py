@@ -2,6 +2,8 @@ import logging
 
 import boto3
 from botocore.exceptions import ClientError
+from .queue_configurations import BucketNotifications, QueueConfiguration
+
 
 logger = logging.getLogger(__name__)
 sqs = boto3.resource('sqs')
@@ -23,8 +25,11 @@ def get_account_number():
     return account_id
 
 
-def configure_s3_sqs_for_notification(bucket_name, queue_name):
-    region = "us-east-1"
+def get_current_bucket_notifications(bucket_name: str) -> BucketNotifications:
+    pass
+
+
+def configure_s3_sqs_for_notification(bucket_name: str, queue_name: str, region: str="us-east-1"):
     settings = {
         "bucket_name": bucket_name,
         "queue_name": queue_name,
@@ -32,23 +37,40 @@ def configure_s3_sqs_for_notification(bucket_name, queue_name):
         "account_number": get_account_number(),
     }
     s3 = boto3.resource("s3", region_name=region)
-    b = s3.Bucket(settings["bucket_name"])
+    b = s3.Bucket(bucket_name)
     client = boto3.client("s3")
-    bucket_notifications_configuration = {
-        "QueueConfigurations": [
-            {
-                "Events": [
-                    "s3:ObjectCreated:*",
-                    "s3:ObjectRemoved:*",
-                    "s3:ObjectRestore:*",
-                ],
-                "Id": "Notifications",
-                "QueueArn": "arn:aws:sqs:{region}:{account_number}:{queue_name}".format(
-                    **settings
-                ),
-            }
-        ]
-    }
+    bucket_notification_id = f"{bucket_name}"
+    queue_arn = "arn:aws:sqs:{region}:{account_number}:{queue_name}".format(
+        **settings
+    )
+    bucket_notifications = get_current_bucket_notifications(bucket_name)
+    bucket_notifications.add(
+        QueueConfiguration(
+            Id=bucket_notification_id,
+            QueueArn=queue_arn,
+            Events=[
+                "s3:ObjectCreated:*",
+                "s3:ObjectRemoved:*",
+                "s3:ObjectRestore:*",
+            ],
+        )
+    )
+    bucket_notifications_configuration = bucket_notifications.to_dict()
+    # bucket_notifications_configuration = {
+    #     "QueueConfigurations": [
+    #         {
+    #             "Events": [
+    #                 "s3:ObjectCreated:*",
+    #                 "s3:ObjectRemoved:*",
+    #                 "s3:ObjectRestore:*",
+    #             ],
+    #             "Id": "Notifications",
+    #             "QueueArn": "arn:aws:sqs:{region}:{account_number}:{queue_name}".format(
+    #                 **settings
+    #             ),
+    #         }
+    #     ]
+    # }
     qpolicy = {
         "Version": "2012-10-17",
         "Id": "arn:aws:sqs:{region}:{account_number}:{queue_name}/SQSDefaultPolicy".format(

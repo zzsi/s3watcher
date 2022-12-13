@@ -53,6 +53,8 @@ class S3Watcher:
 
         Currently we simply overide it. The correct thing to do is to
         append to the QueueConfigurations.
+
+        Adding event notification configs does not incur cost.
         """
         print("Creating AWS SQS Queue : " + sqs_name)
         try:
