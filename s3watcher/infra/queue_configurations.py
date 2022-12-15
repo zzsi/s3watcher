@@ -52,7 +52,7 @@ class BucketNotifications:
         """
         Add a new queue configuration.
         """
-        self.config.append(queue_configuration)
+        self.configs.append(queue_configuration)
 
     def delete(self, id: str):
         """

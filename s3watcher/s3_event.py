@@ -28,10 +28,10 @@ class S3Event:
     key: str
     size: int
     etag: str
-    version_id: str
     file_event_type: FileEventType
+    event_time: str
     sequence: int = None
-    event_datetime: datetime = datetime.now()
+    received_time: datetime = datetime.now()
     event_name: Optional[str] = None
 
     def bytes(self) -> Optional[bytes]:

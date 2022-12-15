@@ -7,11 +7,16 @@ from .utils import list_buckets
 def _main():
     parser = argparse.ArgumentParser(prog="s3watcher")
     parser.add_argument(
-        "command",
+        "-c",
+        "--command",
+        type=str,
+        required=False,
+        default="watch",
         choices=["list-buckets", "watch", "setup"],
         help="watch: watch for events, setup: setup notification and queue",
     )
     parser.add_argument(
+        "-b",
         "--bucket",
         required=False,
         help="The name of the bucket to watch. Required for watch and setup.",
@@ -21,7 +26,9 @@ def _main():
     if args.command == "list-buckets":
         list_buckets(print_to_console=True)
     elif args.command == "watch":
-        watcher = S3Watcher(bucket=args.bucket)
+        assert args.bucket, "Bucket name is required when you use 'watch' command."
+        watcher = S3Watcher(bucket_name=args.bucket,
+                            create_sqs_queue=True)
         for event in watcher.watch():
             print(event)
 

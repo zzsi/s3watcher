@@ -31,14 +31,21 @@ def get_account_number():
     return account_id
 
 
-def get_current_bucket_notifications(bucket_name: str) -> BucketNotifications:
+def get_current_bucket_notifications(bucket) -> BucketNotifications:
     """
     Get the current bucket notifications.
+
+    :param bucket: The bucket to get the notifications for. It should be a boto3 resource.
     """
-    s3 = boto3.resource("s3")
-    bucket = s3.Bucket(bucket_name)
     try:
-        bucket_notification_configuration = bucket.Notification().to_dict()
+        notification_config = bucket.Notification()
+        notification_config.load()
+        bucket_notification_configuration = {
+            "QueueConfigurations": notification_config.queue_configurations
+        }
+    except TypeError:
+        print(f"Bucket: {bucket.name}.")
+        raise
     except ClientError as e:
         if e.response["Error"]["Code"] == "NotificationConfigurationNotFoundError":
             logger.info("No bucket notification configuration found.")
@@ -67,13 +74,14 @@ def configure_s3_sqs_for_notification(bucket_name: str, queue_name: str, region:
         "account_number": get_account_number(),
     }
     s3 = boto3.resource("s3", region_name=region)
-    b = s3.Bucket(bucket_name)
+    bucket = s3.Bucket(bucket_name)
     client = boto3.client("s3")
     bucket_notification_id = f"{bucket_name}"
     queue_arn = "arn:aws:sqs:{region}:{account_number}:{queue_name}".format(
         **settings
     )
-    bucket_notifications = get_current_bucket_notifications(bucket_name)
+    bucket_notifications = get_current_bucket_notifications(bucket)
+    bucket_notifications.clear()
     bucket_notifications.add(
         QueueConfiguration(
             Id=bucket_notification_id,

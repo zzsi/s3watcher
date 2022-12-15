@@ -24,7 +24,7 @@ class S3Watcher:
     Implementation inspired by: https://github.com/dbnicholson/s3watcher/blob/master/s3watcher/server.py
     """
 
-    bucket: str
+    bucket_name: str
     prefix: str = None
 
     create_sqs_queue: bool = False
@@ -38,12 +38,10 @@ class S3Watcher:
 
         session = boto3.session.Session()
         self.s3 = session.resource("s3")
-        bucket = self.bucket
-        self.bucket = self.s3.Bucket(bucket)
-        self.queue_name = f"{bucket}-s3watcher"
-
+        self.bucket = self.s3.Bucket(self.bucket_name)
+        self.queue_name = f"{self.bucket_name}-s3watcher"
+        self.sqs = session.resource("sqs")
         if queue_url:
-            self.sqs = session.resource("sqs")
             self.queue = self.sqs.Queue(queue_url)
             if self.purge_queue_before_watching:
                 # Purge the queue since we're about to re-enumerate the
@@ -55,7 +53,6 @@ class S3Watcher:
                         f"Queue purge already in progress. Queue url: {queue_url}"
                     )
         else:
-            self.sqs = None
             self.queue = None
 
     def setup_notification_and_queue(self, bucket_name: str, sqs_name: str):
@@ -76,8 +73,15 @@ class S3Watcher:
             ]
         }
 
-        Currently we simply overide it. The correct thing to do is to
-        append to the QueueConfigurations.
+        If you try to add a new event notification config to a bucket that already has one,
+        make sure the event types are different, or the prefixes do not overlap, otherwise
+        will be an error like the following:
+
+        botocore.exceptions.ClientError: An error occurred (InvalidArgument) when calling the
+        PutBucketNotificationConfiguration operation: Configurations overlap. Configurations
+        on the same bucket cannot share a common event type.
+
+        https://stackoverflow.com/questions/31471178/aws-s3-trigger-multiple-targets-via-s3-notification-upon-file-receipt
 
         Adding event notification configs does not incur cost.
         """
@@ -86,11 +90,11 @@ class S3Watcher:
             queue = create_queue(sqs_name)
             configure_s3_sqs_for_notification(bucket_name, sqs_name)
         except ClientError:
-            print("Couldn't create queue named {0}.".format(sqs_name))
+            print(f"Couldn't create queue named {sqs_name}.")
             raise
 
         s3_client = boto3.client("s3")
-        bucket_name = self.bucket
+        bucket_name = self.bucket_name
         bucket_notification = s3_client.get_bucket_notification(
             Bucket=bucket_name, ExpectedBucketOwner=get_account_number()
         )
@@ -101,10 +105,13 @@ class S3Watcher:
                 queue = queueConfig["Queue"]
                 queue_name = queue.split(":")[-1]
                 sqs_client = boto3.client("sqs")
-                queue_url = sqs_client.get_queue_url(
+                queue_url_response = sqs_client.get_queue_url(
                     QueueName=queue_name, QueueOwnerAWSAccountId=get_account_number()
                 )
+                queue_url = queue_url_response["QueueUrl"]
+                assert isinstance(queue_url, str)
                 self.queue_url = queue_url
+                self.queue = self.sqs.Queue(queue_url)
             else:
                 print(
                     f"No queue url in QueueConfiguration. Bucket: {bucket_name}")
@@ -117,7 +124,10 @@ class S3Watcher:
         Start watching the bucket for updates.
         """
         if self.create_sqs_queue:
-            self.setup_notification_and_queue(self.bucket, self.queue_name)
+            self.setup_notification_and_queue(
+                self.bucket_name, self.queue_name)
+            LOGGER.warning(
+                f"Created SQS queue {self.queue_name} for bucket {self.bucket_name}")
         while True:
             messages = self.queue.receive_messages(
                 MaxNumberOfMessages=self.max_num_messages_per_fetch,
@@ -135,6 +145,7 @@ class S3Watcher:
                 body = json.loads(msg.body)
                 for record in body.get("Records", []):
                     event = self._create_event(record)
+                    print(record)
                     yield event
                 LOGGER.info(f"Processed and deleting message {msg_id}")
                 # TODO: should the message be deleted here?
@@ -151,9 +162,9 @@ class S3Watcher:
     # Event information created from SQS S3 records
     def _create_event(self, record):
         """Convert S3 SQS record to a S3Event.
-        See
-        https: // docs.aws.amazon.com/AmazonS3/latest/dev/notification-content-structure.html
-        for record details.
+         See
+         https://docs.aws.amazon.com/AmazonS3/latest/dev/notification-content-structure.html
+         for record details.
         """
         event_source = record.get("eventSource")
         if event_source != "aws:s3":
@@ -169,7 +180,7 @@ class S3Watcher:
             return None
 
         bucket = record["s3"]["bucket"]["name"]
-        if bucket != self.bucket:
+        if bucket != self.bucket.name:
             LOGGER.debug("Ignoring record for bucket %s", bucket)
             return None
 
@@ -187,13 +198,23 @@ class S3Watcher:
 
         # The sequencer value is a hex string
         sequence = int(record["s3"]["object"]["sequencer"], base=16)
-
-        return S3Event(
-            bucket=self.bucket,
-            key=key,
-            size=record["s3"]["object"]["size"],
-            etag=record["s3"]["object"]["eTag"],
-            version_id=record["s3"]["object"]["versionId"],
-            sequence=sequence,
-            file_event_type=file_event_type,
-        )
+        if file_event_type == FileEventType.CREATED:
+            return S3Event(
+                bucket=self.bucket_name,
+                key=key,
+                size=record["s3"]["object"]["size"],
+                etag=record["s3"]["object"]["eTag"],
+                sequence=sequence,
+                file_event_type=file_event_type,
+                event_time=record["eventTime"],
+            )
+        if file_event_type == FileEventType.DELETED:
+            return S3Event(
+                bucket=self.bucket_name,
+                size=record["s3"]["object"].get("size"),
+                etag=record["s3"]["object"].get("eTag"),
+                key=key,
+                sequence=sequence,
+                file_event_type=file_event_type,
+                event_time=record["eventTime"],
+            )
