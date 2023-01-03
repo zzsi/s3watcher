@@ -7,7 +7,7 @@ with open("README.md") as f:
     long_description = f.read()
 
 setup(
-    name="s3watcher",
+    name="python-s3watcher",
     version="0.1",
     description="A utility to watch file updates in a S3 folder.",
     url="https://github.com/zzsi/s3watcher",
