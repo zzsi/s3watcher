@@ -7,14 +7,14 @@ with open("README.md") as f:
     long_description = f.read()
 
 setup(
-    name="gbt",
+    name="s3watcher",
     version="0.1",
-    description="A gradient boosted tree library with minimal coding required.",
-    url="https://github.com/zzsi/gbt",
+    description="A utility to watch file updates in a S3 folder.",
+    url="https://github.com/zzsi/s3watcher",
     author="Zhangzhang Si",
     author_email="zhangzhang.si@gmail.com",
     license="MIT",
-    packages=["gbt"],
+    packages=["s3watcher"],
     long_description=long_description,
     long_description_content_type="text/markdown",
     python_requires=">=3.6",
